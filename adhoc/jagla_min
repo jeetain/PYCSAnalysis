@@ -1,0 +1,113 @@
+#!/usr/bin/env python
+# jagla_min: Heatmap generation for specific potential
+
+# Import modules
+import sys
+sys.path.append("..")
+
+import os
+import itertools
+import functools
+import numpy
+import potential
+import crystal
+import equilibrium
+import scipy.interpolate
+
+# Define constants
+cell_root = "../data/3d"
+cell_extension = ".cell"
+hist_extension = ".hist"
+
+# Load crystal cells
+cells = {}
+for name in os.listdir(cell_root):
+    if name.endswith(cell_extension):
+        key = name[:-len(cell_extension)]
+        with open(os.path.join(cell_root, name), "r") as cell_file:
+            cells[key] = crystal.Cell.read_data(cell_file)
+        with open(os.path.join(cell_root, key + hist_extension), "r") as hist_file:
+            cells[key].read_histogram(hist_file)
+cell_names, cells = list(cells.keys()), list(cells.values())
+
+# Generates potential coefficients
+@functools.lru_cache(maxsize=None)
+def generate_coefficients(energy):
+    return potential.jagla_solve(energy)
+
+# Generate phase diagram data without special refinement
+potentials = {(0, 0): potential.jagla, (0, 1): potential.jagla, (1, 1): potential.jagla}
+attractive = generate_coefficients(1.0)
+def generate_data(stoichiometry, x_range, y_range, res):
+    x_space, y_space = numpy.linspace(*x_range, res), numpy.linspace(*y_range, res)
+    x_coefficients = [generate_coefficients(x) for x in x_space]
+    y_coefficients = [generate_coefficients(y) for y in y_space]
+    parameter_sets = [{(0, 0): x, (0, 1): attractive, (1, 1): y} \
+        for x, y in itertools.product(x_coefficients, y_coefficients)]
+    energies = equilibrium.energies(stoichiometry, cells, potentials, parameter_sets)
+    return {xy: [energies[j][i] for j in range(len(energies))] \
+        for i, xy in enumerate(itertools.product(x_space, y_space))}
+
+# Generate phase diagram plot
+def generate_plot(stoichiometry, x_range, y_range, passes=2, res=41):
+    energies = generate_data(stoichiometry, x_range, y_range, res)
+    minima = {key: min(enumerate(value), key=lambda x: x[1])[0] for key, value in energies.items()}
+    second_minima = {key: min((x for x in enumerate(value) if x[0] != minima[key]), key=lambda x: x[1])[0] for key, value in energies.items()}
+    differences = {key: energies[key][second_minima[key]] - energies[key][minima[key]] for key in minima}
+    plot_x = numpy.array([key[0] for key in differences.keys()])
+    plot_y = numpy.array([key[1] for key in differences.keys()])
+    plot_z = numpy.array([value for value in differences.values()])
+    
+    x_space = numpy.linspace(*x_range, ((res - 1) ** passes) + 1)
+    y_space = numpy.linspace(*y_range, ((res - 1) ** passes) + 1)
+    x_grid, y_grid = numpy.meshgrid(x_space, y_space)
+    z_grid = scipy.interpolate.griddata(numpy.array([plot_x, plot_y]).T, plot_z, (x_grid, y_grid), method="cubic")
+    return z_grid
+
+# Make phase diagrams
+data_1 = generate_plot((1, 1), (0.0, 1.0), (0.0, 1.0))
+data_2 = generate_plot((1, 2), (0.0, 1.0), (0.0, 1.0))
+data_3 = generate_plot((1, 3), (0.0, 1.0), (0.0, 1.0))
+for index, name in enumerate(cell_names):
+    print("{}: {}".format(index, name))
+
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+figure = plt.figure(figsize=(12, 4))
+
+axes = figure.add_subplot(1, 3, 1)
+axes.set_title("$\\mathrm{AB}$ stoichiometry")
+image = axes.imshow(data_1, extent=(0, 1, 0, 1), origin="lower", norm=mpl.colors.Normalize(0.0, 0.7))
+axes.set_xlabel("$E_{AA}/E_{AB}$")
+axes.set_ylabel("$E_{BB}/E_{AB}$")
+axes.plot([0,2/3],[2/3,0],color="white",lw=2)
+axes.text(0.65, 0.65, "$\\mathrm{CuPt}$", fontsize=24, horizontalalignment="center", verticalalignment="center", color="white")
+axes.text(0.2, 0.2, "$\\mathrm{CsCl}$", fontsize=24, horizontalalignment="center", verticalalignment="center", color="white")
+
+axes = figure.add_subplot(1, 3, 2)
+axes.set_title("$\\mathrm{AB_2}$ stoichiometry")
+axes.imshow(data_2, extent=(0, 1, 0, 1), origin="lower", norm=mpl.colors.Normalize(0.0, 0.7))
+axes.set_xlabel("$E_{AA}/E_{AB}$")
+axes.set_ylabel("$E_{BB}/E_{AB}$")
+axes.plot([0,1],[1/5,2/5],color="white",lw=2)
+axes.plot([0,1],[0,1/3],color="white",lw=2)
+axes.plot([2/3,1],[0,1/5],color="white",lw=2)
+axes.text(0.5,0.65, "$\\mathrm{CuPt_3}$", fontsize=24, horizontalalignment="center", verticalalignment="center", color="white")
+axes.text(0.15,0.145, "$\\mathrm{CuAu}$", fontsize=18, horizontalalignment="center", verticalalignment="center", color="white")
+axes.text(0.58,0.08, "$\\mathrm{AuCu_3}$", fontsize=18, horizontalalignment="center", verticalalignment="center", color="white")
+axes.text(0.9,0.04, "$\\mathrm{CuPt}$", fontsize=16, horizontalalignment="center", verticalalignment="center", color="white")
+
+axes = figure.add_subplot(1, 3, 3)
+axes.set_title("$\\mathrm{AB_3}$ stoichiometry")
+axes.imshow(data_3, extent=(0, 1, 0, 1), origin="lower", norm=mpl.colors.Normalize(0.0, 0.7))
+axes.set_xlabel("$E_{AA}/E_{AB}$")
+axes.set_ylabel("$E_{BB}/E_{AB}$")
+axes.text(0.5,0.5, "$\\mathrm{CuPt_3}$", fontsize=36, horizontalalignment="center", verticalalignment="center", color="white")
+
+plt.tight_layout()
+figure.subplots_adjust(right=0.875)
+cbar_axes = figure.add_axes([0.9, 0.1, 0.05, 0.8])
+cbar = figure.colorbar(image, cax=cbar_axes)
+cbar.set_label("$\\Delta E/E_{AB}$")
+
+plt.show()

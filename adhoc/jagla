@@ -1,0 +1,142 @@
+#!/usr/bin/env python
+# jagla: Phase diagram generation for specific potential
+
+# Import modules
+import sys
+sys.path.append("..")
+
+import os
+import itertools
+import functools
+import numpy
+import potential
+import crystal
+import equilibrium
+import scipy.interpolate
+
+# Define constants
+cell_root = "../data/3d"
+cell_extension = ".cell"
+hist_extension = ".hist"
+
+# Load crystal cells
+cells = {}
+for name in os.listdir(cell_root):
+    if name.endswith(cell_extension):
+        # Retrieve cell name from file name
+        key = name[:-len(cell_extension)]
+
+        # Read the atom position data
+        with open(os.path.join(cell_root, name), "r") as cell_file:
+            cells[key] = crystal.Cell.read_data(cell_file)
+
+        # Read the pregenerated histogram data
+        with open(os.path.join(cell_root, key + hist_extension), "r") as hist_file:
+            cells[key].read_histogram(hist_file)
+
+cell_names, cells = list(cells.keys()), list(cells.values())
+
+# Generates potential coefficients
+@functools.lru_cache(maxsize=None)
+def generate_coefficients(energy):
+    return potential.jagla_solve(energy)
+
+# Generate phase diagram data without special refinement
+potentials = {(0, 0): potential.jagla, (0, 1): potential.jagla, (1, 1): potential.jagla}
+attractive = generate_coefficients(1.0)
+def generate_data(stoichiometry, x_range, y_range, res):
+    # Generate an xy grid
+    x_space, y_space = numpy.linspace(*x_range, res), numpy.linspace(*y_range, res)
+    x_coefficients = [generate_coefficients(x) for x in x_space]
+    y_coefficients = [generate_coefficients(y) for y in y_space]
+
+    # Build parameter sets and calculate energies
+    parameter_sets = [{(0, 0): x, (0, 1): attractive, (1, 1): y} \
+        for x, y in itertools.product(x_coefficients, y_coefficients)]
+    energies = equilibrium.energies(stoichiometry, cells, potentials, parameter_sets)
+    return {xy: [energies[j][i] for j in range(len(energies))] \
+        for i, xy in enumerate(itertools.product(x_space, y_space))}
+
+# Generate phase diagram data with refinement
+def generate_refined(stoichiometry, x_range, y_range, passes=3, res=11):
+    if not passes: return {}
+    print(*x_range, *y_range)
+
+    # Generate the energies
+    energies = generate_data(stoichiometry, x_range, y_range, res)
+
+    # Determine minimum energies
+    pass_minima = {key: min(enumerate(value), key=lambda x: x[1])[0] \
+        for key, value in energies.items()}
+
+    # Determine energies that need to be rechecked
+    x_space, y_space = numpy.linspace(*x_range, res), numpy.linspace(*y_range, res)
+    for i in range(res - 1):
+        for j in range(res - 1):
+            # Look at the four corners of the current square
+            minimum_1 = pass_minima[(x_space[i], y_space[j])]
+            minimum_2 = pass_minima[(x_space[i], y_space[j + 1])]
+            minimum_3 = pass_minima[(x_space[i + 1], y_space[j])]
+            minimum_4 = pass_minima[(x_space[i + 1], y_space[j + 1])]
+
+            # If any corners differ, zoom in and recalculate
+            if minimum_1 != minimum_2 or minimum_2 != minimum_3 or minimum_3 != minimum_4:
+                energies.update(generate_refined(stoichiometry, \
+                    (x_space[i], x_space[i + 1]), (y_space[j], y_space[j + 1]), \
+                    passes - 1, res))
+    return energies
+
+# Generate phase diagram plot
+def generate_plot(stoichiometry, x_range, y_range, passes=3, res=11):
+    # Generate the energies and extract the minimum energies
+    energies = generate_refined(stoichiometry, x_range, y_range, passes, res)
+    minima = {key: min(enumerate(value), key=lambda x: x[1])[0] for key, value in energies.items()}
+
+    # Extract arrays of values to plot
+    plot_x = numpy.array([key[0] for key in minima.keys()])
+    plot_y = numpy.array([key[1] for key in minima.keys()])
+    plot_z = numpy.array([value for value in minima.values()])
+    
+    # Generate regular grid
+    x_space = numpy.linspace(*x_range, ((res - 1) ** passes) + 1)
+    y_space = numpy.linspace(*y_range, ((res - 1) ** passes) + 1)
+    x_grid, y_grid = numpy.meshgrid(x_space, y_space)
+    z_grid = scipy.interpolate.griddata(numpy.array([plot_x, plot_y]).T, plot_z, (x_grid, y_grid), method="linear")
+    return z_grid
+
+# Make phase diagrams
+data_1 = generate_plot((1, 1), (0.0, 1.0), (0.0, 1.0))
+data_2 = generate_plot((1, 2), (0.0, 1.0), (0.0, 1.0))
+data_3 = generate_plot((1, 3), (0.0, 1.0), (0.0, 1.0))
+for index, name in enumerate(cell_names):
+    print("{}: {}".format(index, name))
+
+# Plotting code
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+figure = plt.figure(figsize=(12, 4))
+
+axes = figure.add_subplot(1, 3, 1)
+axes.set_title("$\\mathrm{AB}$ stoichiometry")
+axes.imshow(data_1, extent=(0, 1, 0, 1), origin="lower")
+axes.set_xlabel("$E_{AA}/E_{AB}$")
+axes.set_ylabel("$E_{BB}/E_{AB}$")
+axes.text(0.5, 0.5, "$\\mathrm{CuAu}$", fontsize=36, horizontalalignment="center", verticalalignment="center")
+
+axes = figure.add_subplot(1, 3, 2)
+axes.set_title("$\\mathrm{AB_2}$ stoichiometry")
+axes.imshow(data_2, extent=(0, 1, 0, 1), origin="lower")
+axes.set_xlabel("$E_{AA}/E_{AB}$")
+axes.set_ylabel("$E_{BB}/E_{AB}$")
+axes.text(0.5, 0.5, "$\\mathrm{AuCu_3}$", fontsize=36, horizontalalignment="center", verticalalignment="center", color="white")
+axes.text(0.75, 0.1, "$\\mathrm{CuAu}$", fontsize=24, horizontalalignment="center", verticalalignment="center")
+
+axes = figure.add_subplot(1, 3, 3)
+axes.set_title("$\\mathrm{AB_3}$ stoichiometry")
+axes.imshow(data_3, extent=(0, 1, 0, 1), origin="lower")
+axes.set_xlabel("$E_{AA}/E_{AB}$")
+axes.set_ylabel("$E_{BB}/E_{AB}$")
+axes.text(0.5, 0.5, "$\\mathrm{AuCu_3}$", fontsize=36, horizontalalignment="center", verticalalignment="center", color="white")
+
+plt.tight_layout()
+plt.show()
